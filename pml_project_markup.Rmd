@@ -1,0 +1,118 @@
+---
+title: "Course Project PML"
+author: "null"
+date: "Wednesday, July 16, 2014"
+output:
+  html_document:
+    toc: yes
+---
+
+## The assigment:
+
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases. 
+
+- Your submission should consist of a link to a Github repo with your R markdown and compiled HTML file describing your analysis. Please constrain the text of the writeup to < 2000 words and the number of figures to be less than 5. It will make it easier for the graders if you submit a repo with a gh-pages branch so the HTML page can be viewed online (and you always want to make it easy on graders :-).
+- You should also apply your machine learning algorithm to the 20 test cases available in the test data above. Please submit your predictions in appropriate format to the programming assignment for automated grading. See the programming assignment for additional details. 
+
+## Data analysis
+### Data preparation
+
+Load the necessary packages. doMC is used for parallelization of the model fitting process on multiple cores (only available for Linux systems). Set the seed of the random number generator for reproducibility:
+
+```{r packages and seed,warning=FALSE,eval=c(1,2,5)} 
+library(caret)
+library(randomForest)
+library(doMC)
+registerDoMC(cores = 8)
+set.seed(3433)
+```
+Read the training and testing datasets:
+```{r , read data, cache =TRUE}
+training<-read.csv("pml-training.csv")
+testing<-read.csv("pml-testing.csv")
+```
+get some idea of the data's structure:
+```{r, data structure}
+summary(training[,10:20])
+dim(training)
+dim(testing)
+table(sapply(training,function(x){sum(is.na(x))}))
+```
+We have many variables, and some of them contain many NAs and #DIV/0 strings.
+In the following, remove the first column (as it just contains the row numbers) and remove columns that contain #DIV/0:
+
+```{r prune data, cache=TRUE}
+divnull<-which(training=="#DIV/0!",arr.ind = TRUE)
+many.NA.pos<-which(sapply(training,function(x){sum(is.na(x))})>10000)
+timestamps<-grep("timestamp",colnames(training))
+
+training<-training[,unique(c(-1,-divnull[,2],-timestamps,-many.NA.pos))]
+testing<-testing[,unique(c(-1,-divnull[,2],-timestamps,-many.NA.pos))]
+dim(training)
+```
+The random forrest algorithm prefers numerical predictors, so we focus on those.
+take care not to remove the (categorical) outcome variable as well:
+
+```{r}
+int.cols<-which(sapply(training,class)=="integer")
+num.cols<-which(sapply(training,class)=="numeric")
+
+training<-cbind(training[,c(int.cols,num.cols)] ,classe=training$classe)
+testing<-cbind(testing[,c(int.cols,num.cols)])
+dim(training)
+
+```
+### Training the model
+Now, fit the random forest model. Cross validation is conducted using an out-of-bag (oob) error etimate (http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr). The main parameters are the number of trees constructed (ntree) and the number of randomly chosen variable to consider at each node (mtry).  The train method for the random forest includes a sensitivity analysis against the mtry parameter, I decided to scan a range of 5 to 100 using only 100 trees and then use the accuracy optimum to calculate a larger forest:
+
+
+```{r,eval=FALSE}
+
+modelFit.rf <- train( classe ~ . , method="rf", data=training, ntree=100, tuneGrid = data.frame(.mtry = floor(seq(5,100,10))) )
+```{r,echo=FALSE,include=FALSE, cache=TRUE}
+### we have to load the actual tree model, re-evaluation takes too long:
+library("R.utils")
+modelFit.rf <- loadToEnv("RF_100Trees_mtrygrid.RData")[["modelFit.rf"]]
+```
+```{r}
+modelFit.rf$results
+plot(modelFit.rf)
+modelFit.rf$bestTune
+```
+Now use a larger forest of 500 trees. An additional simulation (not shown) showed that using Z-scores increases the accuracy for a 100-tree forest, so use the preprocess option:
+```{r,eval=FALSE}
+modelFit.rf <- train(classe~. , method="rf", data=training, ntree=500, tuneGrid = data.frame(.mtry = 15), preProcess = c("center", "scale") )
+```
+### Evaluating the model
+```{r,echo=FALSE,include=FALSE,cache=TRUE}
+### we have to load the actual tree model, re-evaluation takes too long:
+library("R.utils")
+modelFit.rf <- loadToEnv("RF_500Trees_mtry15_zscores.RData")[["modelFit.rf"]]
+```
+```{r,eval=TRUE}
+modelFit.rf
+modelFit.rf$finalModel
+```
+Cross validation shows that the model has a very high accuracy with very low SD. The out of bag estimate of the out of sample error is **0.12%**. Even though this is a bootstrap estimate, this source (http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr) claims that it is not biased. Even though the model will probably perform worse on the test data, we can be confident in the results.
+Plot the importance of the different variable based on their average contribution to reducing the Gini index of a node:
+```{r varImpPlot, fig.width=15,fig.height=8}
+varImpPlot(modelFit.rf$finalModel)
+```
+**num_window**, **roll_belt** and **pitch_forearm** appear to be the variables that contribute most to group purity. This is also apparent in the frequency they are used in the final forest:
+```{r usage plot, fig.width=12,fig.height=8}
+
+order<-order(varUsed(modelFit.rf$finalModel),decreasing = TRUE)
+par("oma"=c(0,6,0,0))
+barplot(varUsed(modelFit.rf$finalModel)[order][1:10],names.arg = colnames(training[,-ncol(training)])[order][1:10],horiz=TRUE,las=1, xlab= "frequency of variable usage in the final model")
+
+```
+
+
+###Prediction
+
+Now that the model is built, predict the outcome for the test data:
+
+
+```{r,eval=TRUE}
+predict(modelFit.rf, newdata = testing)
+```
